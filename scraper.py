@@ -1,7 +1,7 @@
 """
 Выгрузка ленты MRKT (POST /api/v1/feed) за последние HOURS_BACK часов (UTC) в feed.json.
 Тело запроса как в твоём curl: collectionNames=[], курсорная пагинация, count=20.
-Токен: переменная окружения MRKT_ACCESS_TOKEN (можно задать в файле .env рядом со скриптом).
+Токен: переменная окружения MRKT_ACCESS_TOKEN (файл .env или env в Docker). Каталог вывода: OUTPUT_DIR (в образе по умолчанию /data).
 """
 
 from __future__ import annotations
@@ -25,7 +25,14 @@ REQUEST_DELAY_S = 0.5  # пауза между успешными запроса
 REQUEST_TIMEOUT_S = 120  # таймаут одного HTTP-запроса (connect + read)
 POST_MAX_RETRIES = 6  # повторы при сетевых сбоях и при HTTP ≠ 2xx
 POST_RETRY_DELAY_S = 3.0  # базовая пауза перед повтором (экспоненциально растёт)
-OUTPUT_FILE = Path(__file__).resolve().parent / "feed.json"
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def output_feed_path() -> Path:
+    """Каталог выгрузки: env OUTPUT_DIR или каталог со скриптом (по умолчанию)."""
+    base = Path(os.environ.get("OUTPUT_DIR", str(_SCRIPT_DIR)))
+    return base / "feed.json"
+
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
@@ -127,6 +134,7 @@ def post_feed(session: requests.Session, body_json: dict) -> requests.Response:
 def save_snapshot(
     collected: list[dict],
     cutoff: datetime,
+    output_file: Path,
     *,
     partial: bool,
     error: str | None = None,
@@ -143,11 +151,15 @@ def save_snapshot(
         },
         "items": collected,
     }
-    OUTPUT_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
-    load_dotenv(Path(__file__).resolve().parent / ".env")
+    load_dotenv(_SCRIPT_DIR / ".env")
+
+    output_file = output_feed_path()
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     token = os.environ.get(TOKEN_ENV_VAR, "").strip()
     if not token:
@@ -183,8 +195,8 @@ def main() -> None:
             if isinstance(e, requests.HTTPError) and e.response is not None:
                 err = f"HTTP {e.response.status_code} {e}"
             log(f"Ошибка запроса (все повторы исчерпаны): {err}")
-            save_snapshot(collected, cutoff, partial=True, error=err)
-            log(f"Сохранён частичный дамп ({len(collected)} записей) → {OUTPUT_FILE}")
+            save_snapshot(collected, cutoff, output_file, partial=True, error=err)
+            log(f"Сохранён частичный дамп ({len(collected)} записей) → {output_file}")
             raise SystemExit(1) from e
         elapsed = time.perf_counter() - t_req
         data = r.json()
@@ -237,8 +249,8 @@ def main() -> None:
         cursor = next_cursor
         time.sleep(REQUEST_DELAY_S)
 
-    save_snapshot(collected, cutoff, partial=False, error=None)
-    log(f"Готово: {len(collected)} записей → {OUTPUT_FILE}")
+    save_snapshot(collected, cutoff, output_file, partial=False, error=None)
+    log(f"Готово: {len(collected)} записей → {output_file}")
 
 
 if __name__ == "__main__":

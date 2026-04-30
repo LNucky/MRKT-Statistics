@@ -1,0 +1,11 @@
+.git
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.env
+feed.json
+analytics_out
+data

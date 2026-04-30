@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,12 @@ from typing import Any
 
 NANO_PER_TON = 1_000_000_000
 INSTANT_FILL_MAX_SEC = 1.0
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def project_data_dir() -> Path:
+    """Согласован с scraper: env OUTPUT_DIR или каталог проекта."""
+    return Path(os.environ.get("OUTPUT_DIR", str(_SCRIPT_DIR)))
 
 
 def parse_ts(raw: Any) -> datetime | None:
@@ -183,13 +190,13 @@ def main() -> None:
     ap.add_argument(
         "--feed",
         type=Path,
-        default=Path(__file__).resolve().parent / "feed.json",
+        default=project_data_dir() / "feed.json",
         help="Путь к feed.json",
     )
     ap.add_argument(
         "--out",
         type=Path,
-        default=Path(__file__).resolve().parent / "analytics_out",
+        default=project_data_dir() / "analytics_out",
         help="Каталог для PNG / PDF и summary.txt",
     )
     ap.add_argument("--pdf", action="store_true", help="Дополнительно сохранить все графики в один PDF")

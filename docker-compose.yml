@@ -1,0 +1,21 @@
+services:
+  scraper:
+    build: .
+    image: mrkt-hz:latest
+    env_file:
+      - .env
+    environment:
+      OUTPUT_DIR: /data
+    volumes:
+      - ./data:/data
+
+  parser:
+    build: .
+    image: mrkt-hz:latest
+    profiles:
+      - analytics
+    environment:
+      OUTPUT_DIR: /data
+    volumes:
+      - ./data:/data
+    command: ["parser.py"]
