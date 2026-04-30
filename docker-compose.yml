@@ -6,6 +6,12 @@ services:
       - .env
     environment:
       OUTPUT_DIR: /data
+      MRKT_LOG_LISTINGS: "0"
+      MRKT_CHECKPOINT_PAGES: "100"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     volumes:
       - ./data:/data
 

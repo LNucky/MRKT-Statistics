@@ -26,6 +26,7 @@ REQUEST_TIMEOUT_S = 120  # таймаут одного HTTP-запроса (conn
 POST_MAX_RETRIES = 6  # повторы при сетевых сбоях и при HTTP ≠ 2xx
 POST_RETRY_DELAY_S = 3.0  # базовая пауза перед повтором (экспоненциально растёт)
 _SCRIPT_DIR = Path(__file__).resolve().parent
+load_dotenv(_SCRIPT_DIR / ".env")
 
 
 def output_feed_path() -> Path:
@@ -33,6 +34,28 @@ def output_feed_path() -> Path:
     base = Path(os.environ.get("OUTPUT_DIR", str(_SCRIPT_DIR)))
     return base / "feed.json"
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None or v.strip() == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+# В Docker при длинной выгрузке сотни тысяч строк «listing» в лог сильно тормозят вывод; отключи: MRKT_LOG_LISTINGS=0
+LOG_LISTINGS = _env_flag("MRKT_LOG_LISTINGS", True)
+# Каждые N страниц писать feed.json на диск с meta.resume_cursor (0 = только при ошибке и в конце)
+CHECKPOINT_EVERY_PAGES = _env_int("MRKT_CHECKPOINT_PAGES", 100)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
@@ -138,26 +161,36 @@ def save_snapshot(
     *,
     partial: bool,
     error: str | None = None,
+    resume_cursor: str | None = None,
+    checkpoint: bool = False,
+    checkpoint_page: int | None = None,
 ) -> None:
-    out = {
-        "meta": {
-            "api": API_URL,
-            "cutoff_utc": cutoff.isoformat(),
-            "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
-            "hours_back": HOURS_BACK,
-            "row_count": len(collected),
-            "partial": partial,
-            "error": error,
-        },
-        "items": collected,
+    meta: dict = {
+        "api": API_URL,
+        "cutoff_utc": cutoff.isoformat(),
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "hours_back": HOURS_BACK,
+        "row_count": len(collected),
+        "partial": partial,
+        "error": error,
     }
+    if resume_cursor:
+        meta["resume_cursor"] = resume_cursor
+    if checkpoint:
+        meta["checkpoint"] = True
+        meta["in_progress"] = True
+    if checkpoint_page is not None:
+        meta["checkpoint_page"] = checkpoint_page
+    out = {"meta": meta, "items": collected}
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def main() -> None:
-    load_dotenv(_SCRIPT_DIR / ".env")
+def _parse_cutoff_from_meta(cutoff_s: str) -> datetime:
+    return datetime.fromisoformat(cutoff_s.replace("Z", "+00:00"))
 
+
+def main() -> None:
     output_file = output_feed_path()
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -168,19 +201,49 @@ def main() -> None:
             f"(скопируй .env.example → .env). Токен из Authorization / cookie access_token."
         )
 
+    resume = _env_flag("MRKT_RESUME", False)
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=HOURS_BACK)
-    log(f"Старт: окно с {cutoff.isoformat()} по {now.isoformat()} (UTC), HOURS_BACK={HOURS_BACK}")
-
     collected: list[dict] = []
+    cursor: str | None = ""
+    page = 0
+
+    if resume and output_file.exists():
+        try:
+            raw = json.loads(output_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            raise SystemExit(f"Не удалось прочитать {output_file} для MRKT_RESUME: {e}") from e
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+        rs = meta.get("resume_cursor")
+        if not rs:
+            raise SystemExit(
+                f"{output_file.name}: нет meta.resume_cursor — продолжать нечего. "
+                "Убери MRKT_RESUME или начни новую выгрузку."
+            )
+        items = raw.get("items")
+        if not isinstance(items, list):
+            raise SystemExit("В дампе нет массива items — файл повреждён.")
+        collected = list(items)
+        cursor = str(rs)
+        page = int(meta.get("checkpoint_page", 0))
+        cu = meta.get("cutoff_utc")
+        if not cu:
+            raise SystemExit("В meta нет cutoff_utc — старый дамп без поддержки resume.")
+        cutoff = _parse_cutoff_from_meta(str(cu))
+        log(
+            f"Продолжение MRKT_RESUME: {len(collected)} записей на диске, следующая стр. с номера {page + 1}, "
+            f"cutoff из дампа {cutoff.isoformat()}, файл {output_file}"
+        )
+    else:
+        if resume:
+            log("MRKT_RESUME=1, но файл дампа не найден — начинаем с нуля.")
+        cutoff = now - timedelta(hours=HOURS_BACK)
+        log(f"Старт: окно с {cutoff.isoformat()} по {now.isoformat()} (UTC), HOURS_BACK={HOURS_BACK}")
 
     session = requests.Session()
     session.headers.update(HEADERS)
     session.headers["Authorization"] = token
     session.headers["Cookie"] = f"access_token={token}"
 
-    cursor: str | None = ""
-    page = 0
     while True:
         page += 1
         cur_short = (cursor or "")[:12] + "…" if cursor and len(cursor) > 12 else (cursor or "∅")
@@ -195,8 +258,15 @@ def main() -> None:
             if isinstance(e, requests.HTTPError) and e.response is not None:
                 err = f"HTTP {e.response.status_code} {e}"
             log(f"Ошибка запроса (все повторы исчерпаны): {err}")
-            save_snapshot(collected, cutoff, output_file, partial=True, error=err)
-            log(f"Сохранён частичный дамп ({len(collected)} записей) → {output_file}")
+            save_snapshot(
+                collected,
+                cutoff,
+                output_file,
+                partial=True,
+                error=err,
+                resume_cursor=str(cursor or ""),
+            )
+            log(f"Сохранён частичный дамп ({len(collected)} записей), resume_cursor в meta → {output_file}")
             raise SystemExit(1) from e
         elapsed = time.perf_counter() - t_req
         data = r.json()
@@ -221,9 +291,10 @@ def main() -> None:
                 lt = parse_item_time(row)
                 if lt is not None:
                     listed_in_page += 1
-                    gift = row.get("gift") or {}
-                    title = gift.get("title") or gift.get("name") or row.get("collectionName") or ""
-                    log(f"  listing  {lt.isoformat()}  {title!s}")
+                    if LOG_LISTINGS:
+                        gift = row.get("gift") or {}
+                        title = gift.get("title") or gift.get("name") or row.get("collectionName") or ""
+                        log(f"  listing  {lt.isoformat()}  {title!s}")
 
             t = parse_item_time(row)
             if t is None:
@@ -234,7 +305,7 @@ def main() -> None:
         log(f"[стр. {page}] в окне (≥ cutoff): +{kept_this_page} записей, всего накоплено: {len(collected)}, listings на странице: {listed_in_page}")
 
         if not rows:
-            log("[стр. {page}] пустой ответ — стоп.")
+            log(f"[стр. {page}] пустой ответ — стоп.")
             break
         if next_cursor in (None, ""):
             log(f"[стр. {page}] cursor пуст — конец ленты.")
@@ -245,6 +316,22 @@ def main() -> None:
         if oldest is not None and oldest < cutoff:
             log(f"[стр. {page}] самая старая запись {oldest.isoformat()} < cutoff — дальше только старее, стоп.")
             break
+
+        if CHECKPOINT_EVERY_PAGES > 0 and page % CHECKPOINT_EVERY_PAGES == 0:
+            save_snapshot(
+                collected,
+                cutoff,
+                output_file,
+                partial=False,
+                error=None,
+                resume_cursor=str(next_cursor),
+                checkpoint=True,
+                checkpoint_page=page,
+            )
+            log(
+                f"Чекпоинт: стр.{page}, {len(collected)} записей, meta.resume_cursor обновлён → {output_file.name} "
+                f"(интервал MRKT_CHECKPOINT_PAGES={CHECKPOINT_EVERY_PAGES})"
+            )
 
         cursor = next_cursor
         time.sleep(REQUEST_DELAY_S)
