@@ -1,6 +1,12 @@
+x-app-build: &app-build
+  context: .
+  args:
+    APP_UID: ${APP_UID:-1000}
+    APP_GID: ${APP_GID:-1000}
+
 services:
   scraper:
-    build: .
+    build: *app-build
     image: mrkt-hz:latest
     env_file:
       - .env
@@ -16,7 +22,7 @@ services:
       - ./data:/data
 
   parser:
-    build: .
+    build: *app-build
     image: mrkt-hz:latest
     profiles:
       - analytics
