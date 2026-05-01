@@ -51,7 +51,4 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Артефакты этого проекта (дампы и отчёты)
-feed.json
-analytics_out/
-data/
+
