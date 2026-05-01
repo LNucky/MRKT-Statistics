@@ -1,6 +1,10 @@
 # Secrets / локальная конфигурация
 .env
 
+# Pyrogram (auth_mrkt.py)
+*.session
+*.session-journal
+
 # Виртуальное окружение
 .venv/
 venv/
