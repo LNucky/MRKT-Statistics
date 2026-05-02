@@ -22,7 +22,7 @@
 
 **Вариант B — без ручного копирования токена:** в `.env` задай **`TELEGRAM_API_ID`** и **`TELEGRAM_API_HASH`** ([my.telegram.org/apps](https://my.telegram.org/apps)). Скрапер при **старте** и **каждые `MRKT_AUTH_REFRESH_PAGES`** страниц (по умолчанию **1000**) сам получает токен через Pyrogram и обновляет заголовки запросов к ленте.
 
-- Файл сессии Telegram по умолчанию: **`OUTPUT_DIR`/имя из `TELEGRAM_SESSION_NAME`** (в Docker том `./data` → рядом с `feed.json`). Первый интерактивный логин можно сделать локально **`python auth_mrkt.py`**, затем примонтировать **`.session`** на сервер **или** использовать **`TELEGRAM_SESSION_STRING`** (строка сессии Pyrogram) — тогда в контейнере **не нужен** интерактивный ввод.
+- Файл сессии Telegram по умолчанию: **`OUTPUT_DIR`/имя из `TELEGRAM_SESSION_NAME`** (в Docker том `./data` → рядом с `feed.json`). **`docker compose up` без TTY не умеет спросить телефон** — сначала получи сессию: на хосте **`python auth_mrkt.py`**, скопируй **`*.session`** в `./data`, либо задай **`TELEGRAM_SESSION_STRING`**, либо один раз **`docker compose run --rm -it scraper`** для интерактивного входа. Дальше обычный `up` увидит готовый файл.
 
 **Вариант C — только проверить токен:** `python auth_mrkt.py --print-dotenv`.
 
@@ -118,6 +118,7 @@ docker run --rm --user "$(id -u):$(id -g)" --env-file .env -e OUTPUT_DIR=/data -
 ## Частые проблемы
 
 - **`Permission denied: '/data/feed.json'`** — том **`./data`** с хоста перекрывает `/data` в образе: пишет не root, а пользователь **`app`** (по умолчанию **uid 1000**). На хосте: `sudo chown -R 1000:1000 ./data` или создай `data` заранее под тем же uid. Если у тебя другой uid (например `1001`), в **`.env`** для Compose укажи `APP_UID=1001` и `APP_GID=1001`, затем **`docker compose build`** (аргументы сборки подставляются из `.env`) и снова `up`. После сбоя на первом чекпоинте проверь `./data/feed.json`: если файла нет или JSON битый — начни выгрузку заново (или с `MRKT_RESUME=1`, только если в `meta` уже был валидный дамп с `resume_cursor`).
+- **`Enter phone number` / `EOF when reading a line` в Docker** — у контейнера нет интерактивного ввода. Нужен уже существующий `*.session` в томе, или `TELEGRAM_SESSION_STRING`, или первый запуск с `-it` (см. «Токен MRKT»).
 - **Между строками `listing` в логе проходят десятки секунд** — это не медленный парсинг: Docker съедает огромный поток stdout. Отключи подробный вывод: `MRKT_LOG_LISTINGS=0` (в compose уже так для `scraper`).
 - **`Temporary failure in name resolution` / не резолвится `api.tgmrkt.io`** — сбой DNS или сети у контейнера/хоста. В compose добавлены DNS Google/Cloudflare; проверь интернет и VPN. После исчерпания ретраев скрапер сохранит **частичный** `feed.json` с **`meta.resume_cursor`** (можно продолжить: `MRKT_RESUME=1`, см. таблицу настроек).
 - **Обрыв после многих часов** — не обязательно всё зря: на той машине открой каталог с дампом (`./data` в Docker). Если есть `feed.json`, посмотри `meta.row_count` и **`resume_cursor`**. С актуальным скраперами при сетевой ошибке cursor пишется в дамп; **`MRKT_RESUME=1`** один раз — докачка с того же окна (`cutoff` берётся из дампа). Чекпоинты на диск: **`MRKT_CHECKPOINT_PAGES`** (по умолчанию 100). Если процесс убили «жёстко» или OOM и с последнего чекпоинта прошло много страниц — часть данных только в памяти и не сохранилась.

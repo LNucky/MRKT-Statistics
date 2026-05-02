@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -98,6 +99,37 @@ def resolve_session_paths(data_dir: Path) -> tuple[str | None, str, Path]:
     return None, name, workdir
 
 
+def _session_file_path(workdir_path: Path, session_name: str) -> Path:
+    return workdir_path / f"{session_name}.session"
+
+
+def _require_login_possible(
+    session_string: str | None,
+    session_name: str,
+    workdir_path: Path,
+) -> None:
+    """В Docker stdin не TTY — Pyrogram не может запросить телефон без готовой сессии."""
+    if session_string:
+        return
+    sf = _session_file_path(workdir_path, session_name)
+    if sf.is_file() and sf.stat().st_size > 0:
+        return
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return
+    wd = workdir_path
+    raise RuntimeError(
+        "Нет сохранённой Telegram-сессии, а ввод телефона в Docker недоступен (нет TTY). "
+        "Сделай один из вариантов:\n"
+        "  • Добавь в .env TELEGRAM_SESSION_STRING=… — строку сессии Pyrogram "
+        "(после входа на хосте: export_session_string() или см. доку Pyrogram).\n"
+        f"  • Скопируй на хост в каталог тома (например ./data) файл «{session_name}.session», "
+        "предварительно создав его на машине с клавиатурой: "
+        "`python auth_mrkt.py` в venv с теми же TELEGRAM_API_ID/HASH.\n"
+        f"  • Один раз интерактивно: `docker compose run --rm -it scraper` (ключи -it), "
+        f"ввести телефон/код; затем обычный `up` — файл появится в {wd}."
+    )
+
+
 def fetch_mrkt_access_token_sync(api_id: int, api_hash: str, data_dir: Path) -> str:
     return asyncio.run(fetch_mrkt_access_token_async(api_id, api_hash, data_dir))
 
@@ -113,6 +145,9 @@ async def fetch_mrkt_access_token_async(api_id: int, api_hash: str, data_dir: Pa
         ) from e
 
     wd = str(workdir_path)
+
+    if not session_string:
+        _require_login_possible(session_string, session_name, workdir_path)
 
     try:
         if session_string:
@@ -131,6 +166,12 @@ async def fetch_mrkt_access_token_async(api_id: int, api_hash: str, data_dir: Pa
             workdir=wd,
         ) as client:
             return await _webview_then_token(client)
+    except EOFError as e:
+        raise RuntimeError(
+            "Pyrogram ждал ввод телефона, но stdin закрыт (типично для docker compose up без TTY). "
+            "Используй TELEGRAM_SESSION_STRING или положи *.session в OUTPUT_DIR, либо "
+            "`docker compose run --rm -it scraper` для первого входа."
+        ) from e
     except OSError as e:
         err = str(e).lower()
         if "unable to open database" in err or "readonly" in err:
