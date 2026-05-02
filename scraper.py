@@ -1,7 +1,8 @@
 """
 Выгрузка ленты MRKT (POST /api/v1/feed) за последние HOURS_BACK часов (UTC) в feed.json.
 Тело запроса как в твоём curl: collectionNames=[], курсорная пагинация, count=20.
-Токен: переменная окружения MRKT_ACCESS_TOKEN (файл .env или env в Docker). Каталог вывода: OUTPUT_DIR (в образе по умолчанию /data).
+Токен: MRKT_ACCESS_TOKEN или автоматически через TELEGRAM_API_ID + TELEGRAM_API_HASH (Pyrogram),
+см. mrkt_auth.py. Каталог вывода: OUTPUT_DIR (в образе по умолчанию /data).
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ def _env_int(name: str, default: int) -> int:
 LOG_LISTINGS = _env_flag("MRKT_LOG_LISTINGS", True)
 # Каждые N страниц писать feed.json на диск с meta.resume_cursor (0 = только при ошибке и в конце)
 CHECKPOINT_EVERY_PAGES = _env_int("MRKT_CHECKPOINT_PAGES", 100)
+# При режиме TELEGRAM_*: обновлять MRKT токен каждые N страниц (0 = только при старте)
+AUTH_REFRESH_PAGES = _env_int("MRKT_AUTH_REFRESH_PAGES", 1000)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
@@ -190,16 +193,49 @@ def _parse_cutoff_from_meta(cutoff_s: str) -> datetime:
     return datetime.fromisoformat(cutoff_s.replace("Z", "+00:00"))
 
 
+def _data_dir() -> Path:
+    return Path(os.environ.get("OUTPUT_DIR", str(_SCRIPT_DIR)))
+
+
+def _auto_auth_configured() -> bool:
+    return bool(os.environ.get("TELEGRAM_API_ID", "").strip() and os.environ.get("TELEGRAM_API_HASH", "").strip())
+
+
+def obtain_access_token(*, scheduled: bool = False) -> str:
+    """MRKT токен: Pyrogram + /api/v1/auth или MRKT_ACCESS_TOKEN из env."""
+    raw_id = os.environ.get("TELEGRAM_API_ID", "").strip()
+    api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
+    if raw_id and api_hash:
+        try:
+            api_id = int(raw_id)
+        except ValueError:
+            raise SystemExit("TELEGRAM_API_ID должен быть целым числом.") from None
+        from mrkt_auth import fetch_mrkt_access_token_sync
+
+        log(
+            "Обновление MRKT токена (планово)…"
+            if scheduled
+            else "Получение MRKT токена через Telegram (Pyrogram)…"
+        )
+        try:
+            return fetch_mrkt_access_token_sync(api_id, api_hash, _data_dir())
+        except Exception as e:
+            raise SystemExit(f"Не удалось получить токен MRKT: {e}") from e
+    token = os.environ.get(TOKEN_ENV_VAR, "").strip()
+    if not token:
+        raise SystemExit(
+            f"Задай {TOKEN_ENV_VAR} или TELEGRAM_API_ID и TELEGRAM_API_HASH в .env "
+            f"(скопируй .env.example → .env)."
+        )
+    return token
+
+
 def main() -> None:
     output_file = output_feed_path()
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    token = os.environ.get(TOKEN_ENV_VAR, "").strip()
-    if not token:
-        raise SystemExit(
-            f"Задай {TOKEN_ENV_VAR}: экспорт в shell или файл .env рядом со scraper.py "
-            f"(скопируй .env.example → .env). Токен из Authorization / cookie access_token."
-        )
+    token = obtain_access_token(scheduled=False)
+    auto_auth = _auto_auth_configured()
 
     resume = _env_flag("MRKT_RESUME", False)
     now = datetime.now(timezone.utc)
@@ -331,6 +367,14 @@ def main() -> None:
             log(
                 f"Чекпоинт: стр.{page}, {len(collected)} записей, meta.resume_cursor обновлён → {output_file.name} "
                 f"(интервал MRKT_CHECKPOINT_PAGES={CHECKPOINT_EVERY_PAGES})"
+            )
+
+        if auto_auth and AUTH_REFRESH_PAGES > 0 and page % AUTH_REFRESH_PAGES == 0:
+            token = obtain_access_token(scheduled=True)
+            session.headers["Authorization"] = token
+            session.headers["Cookie"] = f"access_token={token}"
+            log(
+                f"[стр. {page}] MRKT токен обновлён (MRKT_AUTH_REFRESH_PAGES={AUTH_REFRESH_PAGES})"
             )
 
         cursor = next_cursor

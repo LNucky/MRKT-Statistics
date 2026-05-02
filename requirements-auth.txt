@@ -1,4 +1,0 @@
-# Только для auth_mrkt.py (локально). Образ Docker scraper ставит requirements.txt без этого файла.
-pyrogram>=2.0.106,<3
-TgCrypto>=1.2.5
-httpx>=0.27.0

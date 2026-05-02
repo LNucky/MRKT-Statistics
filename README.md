@@ -6,26 +6,27 @@
 
 ## Возможности
 
-- **scraper.py** — курсорная пагинация, фильтр по окну **последних N часов (UTC)**, ретраи при сетевых сбоях и не-2xx ответах, опциональный вывод в каталог `OUTPUT_DIR`.
+- **scraper.py** — курсорная пагинация, фильтр по окну **последних N часов (UTC)**, ретраи при сетевых сбоях и не-2xx ответах; опционально **автовыдача и обновление MRKT-токена** через Pyrogram (`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`, см. `mrkt_auth.py`). Вывод в `OUTPUT_DIR`.
 - **parser.py** — сводка по типам событий, объёму продаж в TON, топам коллекций, таймлайны, гистограммы; эвристика «сработавший ордер» (пара `listing` → `sale` одного подарка в течение ≤1 с).
-- **auth_mrkt.py** (опционально) — получить `MRKT_ACCESS_TOKEN` через Telegram: Pyrogram + Mini App бота `@mrkt` + `POST /api/v1/auth`. Зависимости в `requirements-auth.txt` (в **Docker-образ scraper не входят** — запускай на машине, где есть `.env` и логин в Telegram).
+- **auth_mrkt.py** — CLI: один раз вывести токен в консоль (те же переменные, что у скрапера). **`mrkt_auth.py`** — общая логика Telegram Mini App @mrkt → `/api/v1/auth`.
 
 ## Требования
 
 - Python **3.12+** (рекомендуется)
-- Зависимости: `pip install -r requirements.txt`
-- Для **auth_mrkt.py**: дополнительно `pip install -r requirements-auth.txt`
-- Токен доступа MRKT: вручную из DevTools (`Authorization` / cookie `access_token` у `cdn.tgmrkt.io`) или через **auth_mrkt.py** (см. ниже).
+- Зависимости: `pip install -r requirements.txt` (включая Pyrogram/httpx для автотокена).
+- Токен MRKT: вручную **`MRKT_ACCESS_TOKEN`**, или автоматически при **`TELEGRAM_API_ID`** и **`TELEGRAM_API_HASH`** (см. ниже).
 
-## Токен через auth_mrkt.py
+## Токен MRKT
 
-1. Зарегистрируй приложение на [my.telegram.org/apps](https://my.telegram.org/apps) и возьми **api id** и **api hash**.
-2. Установи зависимости: `pip install -r requirements.txt -r requirements-auth.txt`
-3. В `.env` добавь `TELEGRAM_API_ID=число` и `TELEGRAM_API_HASH=строка` (см. `.env.example`).
-4. Запусти `python auth_mrkt.py --print-dotenv` в каталоге проекта. При **первом** запуске Pyrogram запросит вход в аккаунт Telegram в терминале; появится файл сессии `ИМЯ.session` (имя задаётся `TELEGRAM_SESSION_NAME`, по умолчанию `mrkt_auth_session`).
-5. Скопируй выведенную строку `MRKT_ACCESS_TOKEN=…` в `.env`.
+**Вариант A — только строка в `.env`:** DevTools → `Authorization` / cookie `access_token` у `cdn.tgmrkt.io` → **`MRKT_ACCESS_TOKEN=…`**.
 
-Опционально: `MRKT_AUTH_UA` — свой `User-Agent` для запроса к `/api/v1/auth`.
+**Вариант B — без ручного копирования токена:** в `.env` задай **`TELEGRAM_API_ID`** и **`TELEGRAM_API_HASH`** ([my.telegram.org/apps](https://my.telegram.org/apps)). Скрапер при **старте** и **каждые `MRKT_AUTH_REFRESH_PAGES`** страниц (по умолчанию **1000**) сам получает токен через Pyrogram и обновляет заголовки запросов к ленте.
+
+- Файл сессии Telegram по умолчанию: **`OUTPUT_DIR`/имя из `TELEGRAM_SESSION_NAME`** (в Docker том `./data` → рядом с `feed.json`). Первый интерактивный логин можно сделать локально **`python auth_mrkt.py`**, затем примонтировать **`.session`** на сервер **или** использовать **`TELEGRAM_SESSION_STRING`** (строка сессии Pyrogram) — тогда в контейнере **не нужен** интерактивный ввод.
+
+**Вариант C — только проверить токен:** `python auth_mrkt.py --print-dotenv`.
+
+Опционально: **`MRKT_AUTH_UA`** — свой `User-Agent` для запроса к `/api/v1/auth`.
 
 ## Быстрый старт (локально)
 
@@ -34,7 +35,7 @@ python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# отредактируй .env: MRKT_ACCESS_TOKEN=...
+# для автотокена: TELEGRAM_API_ID, TELEGRAM_API_HASH; MRKT_ACCESS_TOKEN можно не задавать
 python scraper.py
 python parser.py
 ```
@@ -46,13 +47,15 @@ python parser.py
 
 | Переменная / файл | Описание |
 |-------------------|----------|
-| `MRKT_ACCESS_TOKEN` | Обязательно. В `.env` или в окружении. |
-| `OUTPUT_DIR` | Каталог, куда пишется `feed.json` (и откуда по умолчанию читает `parser.py`). Без переменной — каталог со скриптом. |
+| `MRKT_ACCESS_TOKEN` | Нужен, если **не** заданы `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`. Иначе скрапер сам получает токен (можно оставить пустым). |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Автовыдача токена MRKT через Pyrogram; из [my.telegram.org/apps](https://my.telegram.org/apps). |
+| `TELEGRAM_SESSION_STRING` | Необязательно. Строка сессии Pyrogram — без файла `.session` и без запроса кода в терминале (удобно в Docker). |
+| `TELEGRAM_SESSION_NAME` | Имя файла сессии относительно `OUTPUT_DIR` (по умолчанию `mrkt_auth_session` → `mrkt_auth_session.session`). |
+| `MRKT_AUTH_REFRESH_PAGES` | При автотокене: обновлять MRKT-токен каждые **N** страниц (по умолчанию **1000**). **`0`** — только при старте, без плановых обновлений по ходу. |
+| `OUTPUT_DIR` | Каталог, куда пишется `feed.json` и по умолчанию файл сессии Telegram. Без переменной — каталог со скриптом. |
 | `MRKT_LOG_LISTINGS` | `1` / `0` — печать каждой строки `listing` в консоль. При длинной выгрузке в Docker лучше **`0`**, иначе миллионы строк сильно тормозят вывод логов (compose/docker). В `docker-compose` для scraper по умолчанию **`0`**. |
 | `MRKT_CHECKPOINT_PAGES` | Каждые **N** страниц сохранять дамп и `meta.resume_cursor` (по умолчанию **100**; **`0`** — только при ошибке и в конце). |
 | `MRKT_RESUME` | **`1` один раз** после обрыва: продолжить с того же `feed.json` (нужны `meta.resume_cursor` и `meta.cutoff_utc`). После успешного окончания убери из `.env`, иначе следующий запуск снова пойдёт в resume. |
-| В **`auth_mrkt.py`**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Обязательно для скрипта получения токена; из [my.telegram.org/apps](https://my.telegram.org/apps). |
-| `TELEGRAM_SESSION_NAME` | Базовое имя файла сессии Pyrogram (по умолчанию `mrkt_auth_session`). |
 | В **`scraper.py`**: `HOURS_BACK` | Окно выгрузки в часах (UTC). Например `48` ≈ последние двое суток. |
 
 Пример `.env` см. в `.env.example`.
@@ -102,6 +105,7 @@ docker run --rm --user "$(id -u):$(id -g)" --env-file .env -e OUTPUT_DIR=/data -
 | Файл | Назначение |
 |------|------------|
 | `scraper.py` | Выгрузка ленты |
+| `mrkt_auth.py` | Получение MRKT-токена (Pyrogram + `/api/v1/auth`), используется скрапером |
 | `parser.py` | Аналитика и визуализация |
 | `requirements.txt` | Зависимости Python |
 | `Dockerfile`, `docker-compose.yml` | Контейнеризация |
