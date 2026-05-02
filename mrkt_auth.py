@@ -1,8 +1,8 @@
 """
 MRKT access token: Pyrogram (Mini App @mrkt) + POST https://api.tgmrkt.io/api/v1/auth.
 
-Файл сессии Telegram по умолчанию кладётся в OUTPUT_DIR (рядом с feed.json в Docker).
-Или задай TELEGRAM_SESSION_STRING — без файла и без интерактивного логина при наличии строки.
+Файл сессии Telegram: {workdir}/{имя}.session, где workdir = OUTPUT_DIR (или родитель для абсолютного TELEGRAM_SESSION_NAME).
+Или TELEGRAM_SESSION_STRING — без файла на диске.
 """
 
 from __future__ import annotations
@@ -76,30 +76,68 @@ async def _webview_then_token(client: Client) -> str:
     return await make_mrkt_auth_request(init_data)
 
 
-def resolve_pyrogram_session_prefix(data_dir: Path) -> tuple[str | None, str]:
-    """(session_string | None, путь-префикс для файловой сессии Pyrogram)."""
+def resolve_session_paths(data_dir: Path) -> tuple[str | None, str, Path]:
+    """
+    Для Client(..., workdir=...):
+    - при строке сессии: (string, _, workdir) — workdir для совместимости;
+    - иначе: (None, имя_без_пути, каталог_где_лежит_.session).
+    """
+    data_dir = data_dir.expanduser().resolve()
     ss = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
     if ss:
-        return ss, ""
-    name = (os.environ.get("TELEGRAM_SESSION_NAME") or "mrkt_auth_session").strip() or "mrkt_auth_session"
-    p = Path(name)
-    prefix = str(p) if p.is_absolute() else str(data_dir / name)
-    return None, prefix
+        return ss, "", data_dir
 
-
-async def fetch_mrkt_access_token_async(api_id: int, api_hash: str, data_dir: Path) -> str:
-    session_string, file_prefix = resolve_pyrogram_session_prefix(data_dir)
-    if session_string:
-        async with Client(
-            "mrkt_inline",
-            api_id=api_id,
-            api_hash=api_hash,
-            session_string=session_string,
-        ) as client:
-            return await _webview_then_token(client)
-    async with Client(file_prefix, api_id=api_id, api_hash=api_hash) as client:
-        return await _webview_then_token(client)
+    raw = (os.environ.get("TELEGRAM_SESSION_NAME") or "mrkt_auth_session").strip() or "mrkt_auth_session"
+    p = Path(raw)
+    if p.is_absolute():
+        workdir = p.parent.resolve()
+        name = p.name
+    else:
+        workdir = data_dir
+        name = raw
+    return None, name, workdir
 
 
 def fetch_mrkt_access_token_sync(api_id: int, api_hash: str, data_dir: Path) -> str:
     return asyncio.run(fetch_mrkt_access_token_async(api_id, api_hash, data_dir))
+
+
+async def fetch_mrkt_access_token_async(api_id: int, api_hash: str, data_dir: Path) -> str:
+    session_string, session_name, workdir_path = resolve_session_paths(data_dir)
+    try:
+        workdir_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(
+            f"Не удалось создать каталог сессии Pyrogram {workdir_path}: {e}. "
+            "Проверь права на OUTPUT_DIR / том ./data (chown для uid контейнера)."
+        ) from e
+
+    wd = str(workdir_path)
+
+    try:
+        if session_string:
+            async with Client(
+                "mrkt_inline",
+                api_id=api_id,
+                api_hash=api_hash,
+                session_string=session_string,
+                workdir=wd,
+            ) as client:
+                return await _webview_then_token(client)
+        async with Client(
+            session_name,
+            api_id=api_id,
+            api_hash=api_hash,
+            workdir=wd,
+        ) as client:
+            return await _webview_then_token(client)
+    except OSError as e:
+        err = str(e).lower()
+        if "unable to open database" in err or "readonly" in err:
+            raise RuntimeError(
+                f"SQLite/Pyrogram не может записать сессию в {wd} ({e}). "
+                "Часто это права на том: на хосте sudo chown -R 1000:1000 ./data "
+                "или APP_UID/APP_GID как у владельца ./data и docker compose build."
+            ) from e
+        raise
+
